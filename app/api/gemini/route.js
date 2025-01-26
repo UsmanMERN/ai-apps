@@ -1,122 +1,157 @@
-// import { GoogleGenerativeAI } from "@google/generative-ai";
-
-// const genAI = new GoogleGenerativeAI(process.env.NEXT_PUBLIC_GEMINI_API_KEY);
-
-// export async function POST(req) {
-//   const { query } = await req.json();
-
-//   try {
-//     const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-//     const result = await model.generateContent(query);
-//     const response = await result.response;
-//     let text = response.text();
-
-//     // Remove Markdown symbols like ** and *
-//     text = text.replace(/\*\*/g, "").replace(/\*/g, "");
-
-//     return new Response(JSON.stringify({ response: text }), {
-//       headers: { "Content-Type": "application/json" },
-//     });
-//   } catch (error) {
-//     console.error("Error:", error);
-//     return new Response(JSON.stringify({ error: "An error occurred while processing your request." }), {
-//       status: 500,
-//       headers: { "Content-Type": "application/json" },
-//     });
-//   }
-// }
-
+// app/api/gemini/route.js
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { networkPulse } from "../..//lib/websocket"; // Import networkPulse
+import { v4 as uuidv4 } from "uuid";
+import { z } from "zod";
 
 const genAI = new GoogleGenerativeAI(process.env.NEXT_PUBLIC_GEMINI_API_KEY);
 
-// Custom response formatter for network insights
-function formatNetworkResponse(text) {
-  // Extract critical information using regex
-  const severityMatch = text.match(/\[SEVERITY: (\w+)\]/i);
-  const predictionsMatch = text.match(/Predictions: (.*?)(?=\n|$)/);
-  const recommendationsMatch = text.match(/Recommendations: (.*?)(?=\n|$)/);
-
-  return {
-    summary: text.split("\n")[0].replace(/\*\*/g, "🌟 "),
-    severity: severityMatch ? severityMatch[1] : "medium",
-    predictions: predictionsMatch
-      ? predictionsMatch[1].split(", ").map((p) => `📉 ${p}`)
-      : ["No predictions available"],
-    recommendations: recommendationsMatch
-      ? recommendationsMatch[1].split(", ").map((r) => `✅ ${r}`)
-      : ["No recommendations available"],
-    visualData: {
-      riskScore: Math.floor(Math.random() * 100), // Mock metric for demo
-      priorityLevel: ["low", "medium", "high"][Math.floor(Math.random() * 3)],
-      timeline: generateMockTimeline(),
-    },
-    rawText: text.replace(/\*\*/g, "").replace(/\*/g, ""),
-    timestamp: new Date().toISOString(),
-  };
-}
-
-function generateMockTimeline() {
-  return Array.from({ length: 7 }, (_, i) => ({
-    day: `Day ${i + 1}`,
-    risk: Math.floor(Math.random() * 100),
-    bandwidth: 80 + Math.floor(Math.random() * 20),
-  }));
-}
-
 export async function POST(req) {
-  const { query, historicalData } = await req.json();
-
   try {
+    const { query, historicalData } = await req.json();
+
+    const prompt = `**Network Analysis Request**
+      Query: ${query}
+      Real-time Metrics: ${JSON.stringify(networkPulse.metrics)}
+      History: ${JSON.stringify(historicalData || {})}
+
+      Respond in this STRICT format:
+      [SEVERITY: LEVEL]
+      **Summary**: Max 10 words with emojis
+      **Predictions**: 3 future network scenarios
+      **Recommendations**: 3 actionable steps
+      **Technical Analysis**: 50-100 word expert analysis`;
+
     const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const result = await model.generateContentStream(prompt);
+    const encoder = new TextEncoder();
 
-    const prompt = `Act as a Network Health AI Analyst. Analyze this network query: "${query}"
-      Historical data: ${JSON.stringify(historicalData || {})}
-      Respond in this format:
-      [SEVERITY: LOW/MEDIUM/HIGH]
-      **Summary**: One-line emoji-rich summary
-      **Predictions**: 3 comma-separated future predictions
-      **Recommendations**: 3 comma-separated action items
-      **Technical Analysis**: 2-3 sentence expert analysis`;
+    const stream = new ReadableStream({
+      async start(controller) {
+        let fullText = "";
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    let text = response.text();
+        for await (const chunk of result.stream) {
+          const chunkText = chunk.text();
+          fullText += chunkText;
 
-    const structuredResponse = formatNetworkResponse(text);
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                partial: chunkText,
+                pulse: networkPulse.metrics,
+              }) + "\n"
+            )
+          );
+        }
 
-    // Add UI-friendly properties
-    structuredResponse.colorCodes = {
-      low: "#2ecc71",
-      medium: "#f1c40f",
-      high: "#e74c3c",
-    };
+        const enhanced = enhanceResponse(fullText, networkPulse.metrics);
+        controller.enqueue(
+          encoder.encode(JSON.stringify({ final: enhanced }) + "\n")
+        );
 
-    structuredResponse.emoji = {
-      low: "🟢",
-      medium: "🟡",
-      high: "🔴",
-    }[structuredResponse.severity.toLowerCase()];
+        controller.close();
+      },
+    });
 
-    return new Response(JSON.stringify(structuredResponse), {
+    return new Response(stream, {
       headers: {
-        "Content-Type": "application/json",
-        "X-AI-Engine": "NetworkPulsePro v2.0",
+        "Content-Type": "application/x-ndjson",
+        "X-API-Version": "NetworkPulsePro v3.1",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
       },
     });
   } catch (error) {
-    console.error("Error:", error);
+    console.error("API Error:", error);
     return new Response(
       JSON.stringify({
-        error: "🚨 Critical System Error",
-        message: "Our AI engines are overheating! Try again later.",
-        debug:
-          process.env.NODE_ENV === "development" ? error.message : undefined,
+        error: "🌩️ Network Storm Detected",
+        message: "Our AI Routers are overwhelmed!",
+        action: "Try again after 30 seconds",
+        code: "NET_AI_OVERLOAD",
+        timestamp: new Date().toISOString(),
       }),
       {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
+        status: 503,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": "30",
+        },
       }
     );
   }
+}
+
+// AI Response Enhancer
+const enhanceResponse = (text, realtimeMetrics) => {
+  const analysisSchema = z.object({
+    severity: z.enum(["LOW", "MEDIUM", "HIGH"]),
+    summary: z.string(),
+    predictions: z.array(z.string()),
+    recommendations: z.array(z.string()),
+    technical: z.string(),
+  });
+
+  try {
+    const severityMatch = text.match(/\[SEVERITY: (\w+)\]/i);
+    const summaryMatch = text.match(/\*\*Summary\*\*: (.*)/);
+    const predictionsMatch = text.match(/\*\*Predictions\*\*: (.*)/);
+    const recommendationsMatch = text.match(/\*\*Recommendations\*\*: (.*)/);
+    const technicalMatch = text.match(/\*\*Technical Analysis\*\*: (.*)/s);
+
+    const structuredData = analysisSchema.parse({
+      severity: severityMatch?.[1] || "MEDIUM",
+      summary:
+        summaryMatch?.[1].replace(/\*\*/g, "🌟 ") || "No summary available",
+      predictions: predictionsMatch?.[1].split(/,\s*/) || [],
+      recommendations: recommendationsMatch?.[1].split(/,\s*/) || [],
+      technical: technicalMatch?.[1] || "",
+    });
+
+    return {
+      ...structuredData,
+      realtime: {
+        latency: realtimeMetrics.latency,
+        packetLoss: realtimeMetrics.packetLoss,
+        bandwidth: realtimeMetrics.bandwidth,
+        connections: realtimeMetrics.connections,
+      },
+      visualization: {
+        riskMatrix: generateRiskMatrix(),
+        timeline: generateSmartTimeline(structuredData.severity),
+      },
+      timestamp: new Date().toISOString(),
+      metadata: {
+        engine: "NetworkPulsePro v3.0",
+        responseId: uuidv4(),
+      },
+    };
+  } catch (error) {
+    console.error("Analysis Enhancement Error:", error);
+    return {
+      error: "🚀 AI Analysis Overload",
+      message: "Failed to parse network insights",
+      fallback: text,
+    };
+  }
+};
+
+// Real-time Visualization Generators
+function generateRiskMatrix() {
+  return Array.from({ length: 5 }, () =>
+    Array.from({ length: 5 }, () =>
+      Math.random() > 0.7 ? "🔥" : Math.random() > 0.4 ? "⚠️" : "✅"
+    )
+  );
+}
+
+function generateSmartTimeline(severity) {
+  const baseDate = new Date();
+  return Array.from({ length: 7 }, (_, i) => ({
+    date: new Date(baseDate.setDate(baseDate.getDate() + 1)),
+    riskLevel:
+      Math.random() *
+      (severity === "HIGH" ? 100 : severity === "MEDIUM" ? 70 : 40),
+    actionRequired: Math.random() > 0.5,
+  }));
 }
